@@ -1,2 +1,3 @@
-clearml
-pytest
+# Pinned so old-vs-new server runs use an identical client.
+clearml==2.2.0
+pytest==9.2.0

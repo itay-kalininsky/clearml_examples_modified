@@ -3,6 +3,8 @@
 SDK_TESTS_MANY_MODELS   number of output models (default 2000)
 SDK_TESTS_TIMING_RUNS   timed repetitions per operation (default 5)
 SDK_TESTS_MAX_RELOAD_SEC  if set, fail when the median reload()/get_task() time exceeds it
+SDK_TESTS_LOAD_CLIENTS  concurrent get_by_id callers in the load phase (default 4; 0 skips it)
+SDK_TESTS_LOAD_SECONDS  load phase duration (default 180, i.e. 3 Zabbix samples at 60s)
 """
 
 import json
@@ -19,13 +21,15 @@ from clearml import Task
 from clearml.backend_api import Session
 from clearml.backend_api.services import models as models_api
 from clearml.backend_api.services import tasks as tasks_api
-from conftest import HERE, PROJECT_NAME, TIMINGS, delete_models, delete_task, unique_name, unique_uri
+from conftest import HERE, LOAD_RESULTS, PROJECT_NAME, TIMINGS, delete_models, delete_task, unique_name, unique_uri
 
 pytestmark = pytest.mark.slow
 
 N = int(os.environ.get("SDK_TESTS_MANY_MODELS", "2000"))
 RUNS = int(os.environ.get("SDK_TESTS_TIMING_RUNS", "5"))
 MAX_SEC = os.environ.get("SDK_TESTS_MAX_RELOAD_SEC")
+LOAD_CLIENTS = int(os.environ.get("SDK_TESTS_LOAD_CLIENTS", "4"))
+LOAD_SECONDS = float(os.environ.get("SDK_TESTS_LOAD_SECONDS", "180"))
 
 
 def _name(i):
@@ -129,6 +133,60 @@ def test_timings(many_models_task):
     if MAX_SEC:
         for r in results:
             assert r["median_s"] <= float(MAX_SEC), f"{r['op']} median {r['median_s']:.3f}s > {MAX_SEC}s"
+
+
+def _pct(sorted_values, q):
+    return sorted_values[min(len(sorted_values) - 1, int(round(q * (len(sorted_values) - 1))))]
+
+
+def test_load_phase(many_models_task):
+    """Sustained tasks.get_by_id load on the many-models task, like the SDK/agent re-reading it.
+
+    Records the time window so server CPU (Zabbix apiserver.cpu.usage, 60s samples) can be
+    matched to it afterwards.
+    """
+    if LOAD_CLIENTS <= 0:
+        pytest.skip("SDK_TESTS_LOAD_CLIENTS=0")
+    task_id, _ = many_models_task
+    session = Task._get_default_session()
+    stop_at = time.monotonic() + LOAD_SECONDS
+
+    def worker(_):
+        latencies, errors = [], 0
+        while time.monotonic() < stop_at:
+            start = time.perf_counter()
+            try:
+                session.send(tasks_api.GetByIdRequest(task=task_id))
+                latencies.append(time.perf_counter() - start)
+            except Exception:  # noqa: BLE001 - counted, not fatal
+                errors += 1
+        return latencies, errors
+
+    start_unix = time.time()
+    with ThreadPoolExecutor(max_workers=LOAD_CLIENTS) as pool:
+        results = list(pool.map(worker, range(LOAD_CLIENTS)))
+    end_unix = time.time()
+
+    latencies = sorted(lat for lats, _ in results for lat in lats)
+    errors = sum(e for _, e in results)
+    duration = end_unix - start_unix
+    record = {
+        "op": "tasks.get_by_id",
+        "models": N,
+        "clients": LOAD_CLIENTS,
+        "duration_s": duration,
+        "start_unix": int(start_unix),
+        "end_unix": int(end_unix),
+        "requests": len(latencies),
+        "errors": errors,
+        "req_per_s": len(latencies) / duration if duration else 0.0,
+        "p50_ms": _pct(latencies, 0.5) * 1000 if latencies else 0.0,
+        "p90_ms": _pct(latencies, 0.9) * 1000 if latencies else 0.0,
+        "p99_ms": _pct(latencies, 0.99) * 1000 if latencies else 0.0,
+    }
+    LOAD_RESULTS.append(record)
+    assert latencies, "no successful get_by_id calls during the load phase"
+    assert errors == 0, f"{errors} get_by_id calls failed during the load phase"
 
 
 def test_output_models_count_order_last(many_models_task):

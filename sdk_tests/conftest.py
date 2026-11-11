@@ -68,17 +68,83 @@ def pytest_report_header(config):
 
 
 TIMINGS = []  # filled by test_06, printed in the terminal summary
+LOAD_RESULTS = []  # filled by test_06's load phase
+_test_windows = []  # (nodeid, start_unix, end_unix, outcome) for matching server CPU (Zabbix) afterwards
+_session_start = time.time()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    start = time.time()
+    outcomes = []
+    item._sdk_outcomes = outcomes
+    yield
+    _test_windows.append(
+        {
+            "test": item.nodeid,
+            "start_unix": int(start),
+            "end_unix": int(time.time()),
+            "outcome": "failed" if "failed" in outcomes else ("skipped" if outcomes == ["skipped"] else "passed"),
+        }
+    )
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if hasattr(item, "_sdk_outcomes") and (report.when == "call" or report.outcome != "passed"):
+        item._sdk_outcomes.append(report.outcome)
+
+
+def _write_run_record():
+    """results/run-<host>-<utc time>.json: test time windows, timings and load results."""
+    from datetime import datetime, timezone
+    from urllib.parse import urlparse
+
+    if _server_error:
+        return None
+    host = urlparse(Session.get_api_server_host()).hostname or "unknown"
+    stamp = datetime.fromtimestamp(_session_start, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_dir = HERE / "results"
+    out_dir.mkdir(exist_ok=True)
+    out = out_dir / f"run-{host}-{stamp}.json"
+    out.write_text(
+        json.dumps(
+            {
+                "api_host": Session.get_api_server_host(),
+                "server_version": Session.server_version,
+                "session_start_unix": int(_session_start),
+                "session_end_unix": int(time.time()),
+                "tests": _test_windows,
+                "timings": TIMINGS,
+                "load": LOAD_RESULTS,
+            },
+            indent=2,
+        )
+    )
+    return out
 
 
 def pytest_terminal_summary(terminalreporter):
-    if not TIMINGS:
-        return
-    terminalreporter.section("get_by_id timings")
-    for t in TIMINGS:
+    record = _write_run_record()
+    if TIMINGS:
+        terminalreporter.section("get_by_id timings")
+        for t in TIMINGS:
+            terminalreporter.write_line(
+                f"{t['op']:<14} models={t['models']:<6} median={t['median_s']:.3f}s "
+                f"p90={t['p90_s']:.3f}s runs={t['runs']}"
+            )
+    for r in LOAD_RESULTS:
+        terminalreporter.section("get_by_id load phase")
         terminalreporter.write_line(
-            f"{t['op']:<14} models={t['models']:<6} median={t['median_s']:.3f}s "
-            f"p90={t['p90_s']:.3f}s runs={t['runs']}"
+            f"models={r['models']} clients={r['clients']} duration={r['duration_s']:.0f}s "
+            f"requests={r['requests']} errors={r['errors']} rate={r['req_per_s']:.1f} req/s "
+            f"p50={r['p50_ms']:.0f}ms p90={r['p90_ms']:.0f}ms p99={r['p99_ms']:.0f}ms "
+            f"window={r['start_unix']}..{r['end_unix']}"
         )
+    if record:
+        terminalreporter.write_line(f"run record (test windows for Zabbix CPU): {record}")
 
 
 def pytest_collection_modifyitems(config, items):
