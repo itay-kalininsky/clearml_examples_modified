@@ -24,10 +24,11 @@ def test_hpo_random_search(cleanup, queue_name):
         add_task_init_call=False,
     )
     cleanup.task(base)
+    base.add_tags([cleanup.tag])
     base.set_parameters({"General/x": 1, "General/y": "a"})
 
     result = run_script(
-        "run_hpo.py", base.id, queue_name, AGENT_TIMEOUT / 60.0, timeout=AGENT_TIMEOUT + 120
+        "run_hpo.py", base.id, queue_name, AGENT_TIMEOUT / 60.0, timeout=AGENT_TIMEOUT + 120, run_tag=cleanup.tag
     )
     cleanup.task(result["controller_id"])
     jobs = result["jobs"]

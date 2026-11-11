@@ -28,6 +28,7 @@ controller = Task.init(
     auto_connect_frameworks=False,
     auto_resource_monitoring=False,
     auto_connect_arg_parser=False,
+    tags=[os.environ["SDK_TESTS_RUN_TAG"]],  # lets the test clean up even if this script times out
 )
 
 opt = HyperParameterOptimizer(

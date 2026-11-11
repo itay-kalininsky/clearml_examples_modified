@@ -10,7 +10,7 @@ import os
 import sys
 import uuid
 
-from clearml import PipelineController
+from clearml import PipelineController, Task
 
 
 def step1(model_uri):
@@ -28,6 +28,7 @@ def step2(model_url):
 
 queue, model_uri = sys.argv[1], sys.argv[2]
 project = os.environ.get("SDK_TESTS_PROJECT", "sdk-regression-tests")
+run_tag = os.environ["SDK_TESTS_RUN_TAG"]  # lets the test clean up even if this script times out
 
 pipe = PipelineController(
     name=f"test_08_pipeline-{uuid.uuid4().hex[:8]}",
@@ -35,6 +36,7 @@ pipe = PipelineController(
     version="1.0.0",
     add_pipeline_tags=False,
 )
+Task.current_task().add_tags([run_tag])
 pipe.set_default_execution_queue(queue)
 pipe.add_function_step(
     name="step1",
@@ -42,7 +44,12 @@ pipe.add_function_step(
     function_kwargs={"model_uri": model_uri},
     function_return=["model_id"],
     packages=["clearml"],
-    monitor_models=["*"],
+    # monitor_models matches the name the step task links the model under, which for
+    # update_weights(register_uri=".../step1.pt") is the file stem "step1" (OutputModel(name=...)
+    # only names the model itself). The documented "*" wildcard is not implemented in
+    # PipelineController._monitor_node (exact name match), so an explicit name is used.
+    monitor_models=["step1"],
+    tags=[run_tag],
     cache_executed_step=False,
 )
 pipe.add_function_step(
@@ -53,6 +60,7 @@ pipe.add_function_step(
     function_return=["model_url"],
     packages=["clearml"],
     cache_executed_step=False,
+    tags=[run_tag],
 )
 pipe.start_locally(run_pipeline_steps_locally=False)
 

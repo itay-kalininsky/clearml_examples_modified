@@ -105,18 +105,26 @@ def unique_uri(filename="model.pt"):
     return f"https://example.invalid/sdk-tests/{uuid.uuid4().hex}/{filename}"
 
 
-def run_script(script, *args, timeout=300):
+def run_script(script, *args, timeout=300, run_tag=None):
     """Run a helper script in a fresh process (own Task.init singleton) and return its JSON output.
 
     The helper must print exactly one line starting with 'RESULT ' followed by JSON.
+    run_tag is passed as SDK_TESTS_RUN_TAG so helpers can tag what they create.
     """
-    proc = subprocess.run(
-        [sys.executable, str(HERE / "helpers" / script), *map(str, args)],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=dict(os.environ, SDK_TESTS_PROJECT=PROJECT_NAME),
-    )
+    env = dict(os.environ, SDK_TESTS_PROJECT=PROJECT_NAME)
+    if run_tag:
+        env["SDK_TESTS_RUN_TAG"] = run_tag
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(HERE / "helpers" / script), *map(str, args)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as ex:
+        out = ex.stdout.decode(errors="replace") if isinstance(ex.stdout, bytes) else (ex.stdout or "")
+        raise AssertionError(f"{script} timed out after {timeout:.0f}s\n--- stdout tail ---\n{out[-4000:]}")
     for line in proc.stdout.splitlines():
         if line.startswith("RESULT "):
             return json.loads(line[len("RESULT "):])
@@ -126,12 +134,36 @@ def run_script(script, *args, timeout=300):
     )
 
 
+NO_WORKER_GRACE = float(os.environ.get("SDK_TESTS_NO_WORKER_GRACE", "120"))
+
+
+def worker_problem():
+    """None if a worker listens on QUEUE_NAME, else a reason string."""
+    try:
+        return _check_agent(APIClient())
+    except Exception as ex:  # noqa: BLE001
+        return f"could not check workers: {ex}"
+
+
 def wait_for_status(task, timeout=AGENT_TIMEOUT, interval=2.0):
-    """Poll until the task completes or fails. Task.wait_for_status polls every 60s with no timeout."""
+    """Poll until the task completes or fails. Task.wait_for_status polls every 60s with no timeout.
+
+    Fails early if the task stays queued while no worker listens on the queue for NO_WORKER_GRACE
+    seconds (e.g. the agent died with its SSH session).
+    """
     deadline = time.monotonic() + timeout
     status = None
+    no_worker_since = None
     while time.monotonic() < deadline:
         status = str(task.get_status())
+        if status == "queued":
+            problem = worker_problem()
+            if problem is None:
+                no_worker_since = None
+            else:
+                no_worker_since = no_worker_since or time.monotonic()
+                if time.monotonic() - no_worker_since > NO_WORKER_GRACE:
+                    raise AssertionError(f"task {task.id} is queued but {problem} (for {NO_WORKER_GRACE:.0f}s)")
         if status in ("completed", "closed", "published"):
             return status
         if status in ("failed", "stopped"):
@@ -153,6 +185,25 @@ def delete_models(model_ids, chunk=500):
             session.send(models_api.DeleteManyRequest(ids=ids[i:i + chunk], force=True))
         except Exception as ex:  # noqa: BLE001 - cleanup must not fail the test
             logging.getLogger(__name__).warning("model cleanup failed: %s", ex)
+
+
+def delete_tagged(tag):
+    """Delete every task carrying `tag`, their direct children (pipeline steps, HPO jobs) and
+    the models those tasks created. Used so cleanup works even when a helper never returned ids."""
+    client = APIClient()
+    tagged = [t.id for t in client.tasks.get_all(tags=[tag], search_hidden=True, only_fields=["id"])]
+    if not tagged:
+        return
+    children = [t.id for t in client.tasks.get_all(parent=tagged, search_hidden=True, only_fields=["id"])]
+    task_ids = list(dict.fromkeys(children + tagged))
+    model_ids = [m.id for m in client.models.get_all(task=task_ids, only_fields=["id"])]
+    delete_models(model_ids)
+    for tid in task_ids:
+        try:
+            Task.dequeue(tid)
+        except Exception:  # noqa: BLE001 - not queued
+            pass
+        delete_task(tid)
 
 
 def delete_task(task):
@@ -184,6 +235,8 @@ def cleanup():
     class Cleanup:
         def __init__(self):
             self.tasks, self.models = [], []
+            # Pass to run_script(run_tag=...) / add to tasks; everything tagged is swept in teardown.
+            self.tag = unique_name("sdk-tests-run")
 
         def task(self, t):
             self.tasks.append(t.id if isinstance(t, Task) else t)
@@ -200,6 +253,10 @@ def cleanup():
     delete_models(c.models)
     for tid in reversed(c.tasks):
         delete_task(tid)
+    try:
+        delete_tagged(c.tag)
+    except Exception as ex:  # noqa: BLE001
+        logging.getLogger(__name__).warning("tag cleanup failed: %s", ex)
 
 
 @pytest.fixture

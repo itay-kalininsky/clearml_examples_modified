@@ -139,8 +139,10 @@ def test_output_models_count_order_last(many_models_task):
 
     assert len(outputs) == N
     assert {m.id for m in outputs} == set(model_ids)
-    # Each model is listed under the name the task links it with.
-    assert all(m.name == _name(model_ids.index(m.id)) for m in outputs)
+    # Each model is listed under the name the task links it with (the ModelsList key;
+    # Model.name is the model's own name, which differs here on purpose).
+    link_names = list(outputs.keys())
+    assert link_names == [_name(model_ids.index(m.id)) for m in outputs]
 
     # Order: oldest first. The SDK takes the first page of models.get_all(order_by=created)
     # (the server's default page is 500, see clearml/backend_interface/task/models.py:107) and
@@ -154,7 +156,8 @@ def test_output_models_count_order_last(many_models_task):
     assert created[outputs[-1].id] == max(created.values())
     if N > 500:
         # Past the first page the tail comes from link order, so the last item is exact.
-        assert outputs[-1].name == _name(N - 1)
+        assert link_names[-1] == _name(N - 1)
+        assert outputs[-1].id == model_ids[-1]
     # The task-level links keep the order they were written in.
     assert [m.name for m in task.data.models.output] == [_name(i) for i in range(N)]
 

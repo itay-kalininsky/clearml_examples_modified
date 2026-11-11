@@ -10,7 +10,7 @@ pytestmark = pytest.mark.agent
 
 def test_pipeline_model_reference(cleanup, queue_name):
     model_uri = unique_uri("step1.pt")
-    result = run_script("run_pipeline.py", queue_name, model_uri, timeout=AGENT_TIMEOUT)
+    result = run_script("run_pipeline.py", queue_name, model_uri, timeout=AGENT_TIMEOUT, run_tag=cleanup.tag)
 
     controller = Task.get_task(task_id=result["controller_id"])
     step_ids = result["step_ids"]
@@ -31,7 +31,7 @@ def test_pipeline_model_reference(cleanup, queue_name):
     assert step1_models[-1].url == model_uri
     assert step2.get_parameters().get("kwargs/model_url") == model_uri
 
-    # The controller lists the steps' output models (monitor_models=["*"]).
+    # The controller lists the steps' output models (monitor_models=["step1"]).
     controller.reload()
     controller_model_ids = {m.id for m in controller.models["output"]}
     assert step1_models[-1].id in controller_model_ids

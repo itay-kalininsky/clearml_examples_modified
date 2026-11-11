@@ -13,3 +13,9 @@ Modified ClearML example used to reproduce a task being populated with thousands
 pip install -r requirements.txt
 python pytorch_tensorboardx.py --epochs 2000 --no-cuda [--output-uri <uri>]
 ```
+
+## Other contents
+
+- `scripts/create_task.py` creates a draft ClearML task that runs `pytorch_tensorboardx.py` from this repo (`Task.create`).
+- `scripts/create_hparams_task.py [N]` creates a draft task with N hyperparameters (default 2000) spread over 4 sections.
+- `sdk_tests/` is the SDK regression suite for DAG-21065 (see `sdk_tests/README.md`).
